@@ -24,9 +24,8 @@
 #include "EEPROM.h"
 #include "SD.h"
 #include "esp_now.h"
-#include "HTTPClient.h"
 #include "WiFi.h"
-#include "WiFiClientSecure.h"
+#include "HTTPClient.h"
 
 //===================================  Hardware Connections =============================
 #define TFT_DC             21                     // Display "DC" pin
@@ -43,10 +42,8 @@
 
 //===================================  Wireless Constants ===============================
 #define CHANNEL             1                     // Wifi channel number
-#define WIFI_AP_SSID   "W8BH Tutor"               // Wifi AP network name, connect to other tutor
-#define WIFI_AP_PWD    "REDACTED"               // Wifi AP password
-#define WIFI_STA_SSID  "YourWifiName"             // Wifi STA network name, connect to router
-#define WIFI_STA_PWD   "YourWifiPassword"         // Wifi STA password
+#define WIFI_SSID      "REDACTED"               // Wifi network name
+#define WIFI_PWD       "REDACTED"               // Wifi password
 #define MAXBUFLEN         100                     // size of incoming character buffer
 #define CMD_ADDME        0x11                     // request to add this unit as a peer
 #define CMD_LEAVING      0x12                     // flag this unit as leaving
@@ -143,10 +140,11 @@ char *names[]     = {"WAYNE", "TYE", "DARREN", "MICHAEL", "SARAH", "DOUG", "FERN
                      "KEN", "SCOTT", "DAN", "ERVIN", "GENE", "PAUL", "VINCENT"};
 char *cities[]    = {"DAYTON, OH", "HADDONFIELD, NJ", "MURRYSVILLE, PA", "BALTIMORE, MD", "ANN ARBOR, MI", 
                      "BOULDER, CO", "BILLINGS, MT", "SANIBEL, FL", "CIMMARON, NM", "TYLER, TX", "OLYMPIA, WA"};
-char *rigs[]      = {"YAESU FT101", "KENWOOD 780", "ELECRAFT K3", "HOMEBREW", "QRPLABS QCX", "ICOM 7410", "FLEX 6400"};
+char *rigs[]      = {"YAESU FTDX10", "KENWOOD 780", "ELECRAFT K3", "HOMEBREW", "QRPLABS QCX", "ICOM 7410", "FLEX 6400"};
 char punctuation[]= "!@$&()-+=,.:;'/";
 char prefix[]     = {'A', 'W', 'K', 'N'};
-char koch[]       = "KMRSUAPTLOWI.NJEF0Y,VG5/Q9ZH38B?427C1D6X";
+//char koch[]       = "KMRSUAPTLOWI.NJEF0Y,VG5/Q9ZH38B?427C1D6X";
+char koch[]       = "HOFUWBREATINPGSLCD16.ZJ/2840KMY59,QXV73?"; //LICW
 byte morse[] = {                                  // Each character is encoded into an 8-bit byte:
   0b01001010,        // ! exclamation        
   0b01101101,        // " quotation          
@@ -225,42 +223,26 @@ bool paused     = false;                          // if true, morse output is pa
 bool ditRequest = false;                          // dit memory for iambic sending
 bool dahRequest = false;                          // dah memory for iambic sending
 bool inStartup  = true;                           // startup flag
-char myCall[10] = "W8BH";
+char myCall[10] = "N2EPE";
 int textColor   = TEXTCOLOR;                      // foreground (text) color
 int bgColor     = BG;                             // background (screen) color
 int brightness  = 100;                            // backlight level (range 0-100%)
 int startItem   = 0;                              // startup activity.  0 = main menu
+int MinSpeed    = 5;
+int MaxSpeed    = 40;
+long avgDitTime = 60000 / (50 * charSpeed);
+long avgDahTime = 3 * avgDitTime; 
 
 
 
 //===================================  Menu Variables ===================================
 int  menuCol=0, textRow=0, textCol=0;
 char *mainMenu[] = {" Receive ", "  Send  ", "Config "};        
-char *menu0[]    = {" Koch    ", " Letters ", " Words   ", " Mixed   ", " SD Card ", " QSO     ", " Callsign", " News    ",  " Exit    "};
+char *menu0[]    = {" LICW    ", " Letters ", " Words   ", " Mixed   ", " SD Card ", " QSO     ", " Callsign", " News    ",  " Exit    "};
 char *menu1[]    = {" Practice", " Copy One", " Copy Two", " Cpy Word", " Cpy Call", " Flashcrd", " Head Cpy", " Two-Way ", " Exit    "};
 char *menu2[]    = {" Speed   ", " Chk Spd ", " Tone    ", " Key     ", " Callsign", " Screen  ", " Defaults", " Exit    "};
 
-//===================================  RSS News Feeds ===================================
-const int numberOfFeeds = 6;
 
-char feedNames[numberOfFeeds][FNAMESIZE] = {
-  " ARRL       ", 
-  " DXNews     ", 
-  " Southgate  ", 
-  " BBC        ", 
-  " SciAm      ",
-  " GoogleTech "
-  };        
-
-// Note: don't add https:// to the URLs
-String feedUrls[] = {
-        "https://www.arrl.org/arrl.rss",
-        "https://dxnews.com/rss.xml",
-        "http://www.southgatearc.org/sarc.rss",
-        "https://feeds.bbci.co.uk/news/world/rss.xml",
-        "http://rss.sciam.com/ScientificAmerican-News?format=xml",
-        "https://news.google.com/rss/search?q=technology+when%3C7d&hl=en-US&gl=US&ceid=US:en",
-};
 //===================================  Wireless Code  ===================================
 
 esp_now_peer_info_t peer;                        // holds information about peer
@@ -292,8 +274,8 @@ void initESPNow()
 
 void configDeviceAP()
 {
-  char* SSID = WIFI_AP_SSID;                         // access point name for this device
-  char* Password = WIFI_AP_PWD;                      // password
+  char* SSID = WIFI_SSID;                         // access point name for this device
+  char* Password = WIFI_PWD;                      // password
   Serial.print("Starting Soft AP: ");
   Serial.println(WiFi.softAP(SSID,Password,CHANNEL,0)?
     "Ready": "FAILED");                           // set up WiFi access point
@@ -495,6 +477,8 @@ void buttonISR()
       button_downtime = end - start;              // and record how long button was down
     }
   }
+  Serial.println("button" + button_state ? "t": "f");
+
 }
 
 /* 
@@ -645,15 +629,13 @@ void dah() {                                      // send a dah
   }
 }
 
-void sendElements(int x, bool lastElement=false) { // send string of bits as Morse      
+void sendElements(int x) {                        // send string of bits as Morse      
   while (x>1) {                                   // stop when value is 1 (or less)
     if (x & 1) dit();                             // right-most bit is 1, so dit
     else dah();                                   // right-most bit is 0, so dah
     x >>= 1;                                      // rotate bits right
   }
-  if( !lastElement ) {
-      characterSpace();                           // add inter-character spacing
-  }
+  characterSpace();                               // add inter-character spacing
 }
 
 void roger() {
@@ -666,35 +648,25 @@ void roger() {
    For example:  5 = binary 0b0101.  The right-most bit is 1 so the first element is a dit.
    The next element to the left is a 0, so a dah follows.  Only a 1 remains after that, so
    the character is complete: dit-dah = morse character 'A'. 
-   If the caller indicates this is the lastCharacter, the function immediately returns after
-   sending the character, otherwise a inter-character wait is added
 */
 
-void sendCharacter(char c, bool lastCharacter=false) { // send a single ASCII character in Morse
+void sendCharacter(char c) {                      // send a single ASCII character in Morse
   if (button_pressed) return;                     // user wants to quit, so vamoose
   if (c<32) return;                               // ignore control characters
   if (c>96) c -= 32;                              // convert lower case to upper case
   if (c>90) return;                               // not a character
   addCharacter(c);                                // display character on LCD
-
   if (c==32) wordSpace();                         // space between words 
-  else {
-    sendElements(morse[c-33], lastCharacter);     // send the character
-  }
+  else sendElements(morse[c-33]);                 // send the character
   checkForSpeedChange();                          // allow change in speed while sending
   do {
     checkPause();
   } while (paused);                               // allow user to pause morse output
 }
 
-void sendString (const char *ptr) {   
+void sendString (const char *ptr) {             
   while (*ptr)                                    // send the entire string
     sendCharacter(*ptr++);                        // one character at a time
-}
-
-void sendStringNoWait (const char *ptr) {
-  while (*ptr)                                    // send the entire string
-    sendCharacter(*ptr++, !*ptr);                 // one character at a time, indicate if this is the last character
 }
 
 void sendMorseWord (char *ptr) {             
@@ -796,19 +768,22 @@ int getLessonNumber()
     int dir = readEncoder();
     if (dir!=0)                                   // user rotated encoder knob:
     {
-      lesson += dir;                              // ...so change speed up/down 
+      lesson += dir;                              // ...so change lesson up/down 
       if (lesson<1) lesson = 1;                   // dont go below 1 
       if (lesson>kochLevel) lesson = kochLevel;   // dont go above maximum
       introLesson(lesson);                        // show new lesson number
     }
   }
+  delay(2000);
+  button_pressed = false;
+
   return lesson;
 }
 
 void sendKoch()
 {
   while (!button_pressed) {
-    setTopMenu("Koch lesson");
+    setTopMenu("Koch lesson - LICW order");
     int lesson = getLessonNumber();               // allow user to select lesson
     if (button_pressed) return;                   // user quit, so sad
     sendKochLesson(lesson);                       // do the lesson                      
@@ -863,7 +838,7 @@ void randomCallsign(char* call)                   // returns with random US call
     addChar(call,'A'+i);                          // add second char to prefix                                                         
   }
   addChar(call,randomNumber());                   // add zone number to callsign
-  for (int i=0; i<random(1, 4); i++)              // Suffix contains 1-3 letters
+  for (int i=0; i<random(2, 4); i++)              // Suffix contains 1-3 letters
     addChar(call,randomLetter());                 // add suffix letter(s) to call
 }
 
@@ -972,6 +947,107 @@ void sendQSO()
   strcat(qso,otherCall);
   strcat(qso," KN");
   sendString(qso);                                // send entire QSO
+}
+
+void sendNews() {
+  WiFi.mode(WIFI_MODE_STA);
+  WiFi.begin("REDACTED","REDACTED");
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.println("Connecting to WiFi..");
+  }
+ 
+  Serial.print("ESP32 IP on the WiFi network: ");
+  Serial.println(WiFi.localIP());
+
+  HTTPClient http;
+  WiFiClient client;
+  char c;
+
+  if (client.connect("feeds.bbci.co.uk", 80)) {
+  //if (client.connect("www.arrl.org", 80)) {
+
+    Serial.println("connected to server");
+
+    // Make a HTTP request:
+
+    //client.println("GET /arrl.rss HTTP/1.1");
+    client.println("GET /news/rss.xml HTTP/1.1");
+    client.println("Host: feeds.bbci.co.uk");    
+
+    client.println("Connection: close");
+    client.println();
+
+    unsigned long timeout = millis();
+    while (client.available() == 0) {
+        if (millis() - timeout > 5000) {
+            Serial.println(">>> Client Timeout !");
+            client.stop();
+            return;
+        }
+    }
+
+    String page;
+    while (client.available()) {
+      String line = client.readStringUntil('\r');
+      page += line;
+    }
+
+    int readIndex = 0;
+    int maxIndex = page.length();
+      
+    while(readIndex<maxIndex) {
+      readIndex = page.indexOf("<item>", readIndex);
+      int titleStart = page.indexOf("<title>", readIndex);
+      if( titleStart<0) break;
+      readIndex = titleStart + 7;
+      int titleEnd = page.indexOf("</title>", readIndex);
+      String title = page.substring(readIndex, titleEnd);
+      title = stripHtml(title);
+      sendString(title.c_str());
+      sendString(" ");
+      if(titleEnd<0) break;
+      readIndex = titleEnd + 8;
+      int descriptionStart = page.indexOf("<description>", readIndex);
+      if(descriptionStart<0) break;
+      readIndex = descriptionStart + 13;
+      int descriptionEnd = page.indexOf("</description>", readIndex);
+      if(descriptionEnd<0) break;
+      String description = page.substring(readIndex, descriptionEnd);
+      description = stripHtml(description);
+      sendString(description.c_str());
+      readIndex = descriptionStart + description.length() + 14;
+      sendString(" = ");
+    }
+  
+
+  }
+  
+}
+
+String stripHtml(String s) {
+  int readIndex = 0;
+  int maxIndex = s.length();
+
+  // remove any html markup, they start with &lt; and end with &gt; ('<' and '>')
+  while(readIndex<maxIndex) {
+    int startTag = s.indexOf("&lt;", readIndex);
+    int endTag = s.indexOf("&gt;", readIndex);
+    int lenRemove = endTag + 4 - startTag;
+    s.remove(startTag, lenRemove);
+    maxIndex -= lenRemove;
+  }
+  s.replace("&apos;", "'");
+  s.replace("&#039;", "'");
+  s.replace("&amp;", "&");
+  s.replace("&#038;", "\"");
+
+  s.replace("<![CDATA[", "");
+  s.replace("]", "");
+  s.replace(">", "");
+  s.replace("<", "");
+  return s;
 }
 
 int getFileList  (char list[][FNAMESIZE])         // gets list of files on SD card
@@ -1084,118 +1160,6 @@ void sendFromSD()                                 // show files on SD card, get 
   sendFile(list[choice]);                         // output text & morse until user quits
 }
 
-// Downloads the content of the feedUrl into the page string
-void downloadRssFeed(String feedUrl, String& page) 
-{
-  WiFi.mode(WIFI_MODE_STA);
-  WiFi.begin(WIFI_STA_SSID, WIFI_STA_PWD);
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.println("Connecting to WiFi..");
-  }
- 
-  Serial.print("ESP32 IP on the WiFi network: ");
-  Serial.println(WiFi.localIP());
-
-  WiFiClient *wifiClient;
-  HTTPClient httpClient;
-
-  if(feedUrl.startsWith("https")) {
-    WiFiClientSecure *secureClient = new WiFiClientSecure();
-    secureClient->setInsecure();
-    wifiClient = secureClient;
-  } else {
-    wifiClient = new WiFiClient();
-  }
-  
-  if(httpClient.begin(*wifiClient, feedUrl)) {
-    int httpCode = httpClient.GET();
-    Serial.printf("Got page, %d bytes", httpClient.getSize());
-
-    if(httpCode == HTTP_CODE_OK) {
-      String payload = httpClient.getString();
-      Serial.println(payload);
-      page = payload;
-    } else {
-          Serial.printf("[HTTP] GET... failed, error: %s\n", httpClient.errorToString(httpCode).c_str());
-    }  
-    Serial.println(page);
-  }
-}
-
-String stripHtml(String s) {
-  int readIndex = 0;
-  int maxIndex = s.length();
-
-  // remove any html markup, that starts with &lt; and ends with &gt; ('<' and '>')
-  while(readIndex<maxIndex) {
-    int startTag = s.indexOf("&lt;", readIndex);
-    int endTag = s.indexOf("&gt;", readIndex);
-    int lenRemove = endTag + 4 - startTag;
-    s.remove(startTag, lenRemove);
-    maxIndex -= lenRemove;
-  }
-
-  // remove html entities or replace them with characters
-  s.replace("&apos;", "'");
-  s.replace("&#039;", "'");
-  s.replace("&amp;", "&");
-  s.replace("&#038;", "\"");
-
-  s.replace("<![CDATA[", "");
-  s.replace("]", "");
-  s.replace(">", "");
-  s.replace("<", "");
-  return s;
-}
-
-
-
-void sendNews() {
-
-  int feedNumber = fileMenu(feedNames, numberOfFeeds);
-  String feedUrl = feedUrls[feedNumber];
-
-  newScreen();                                    // clear screen below menu
-  button_pressed = false;                         // reset flag for new presses
-
-  String page;
-  downloadRssFeed(feedUrl, page);
-
-  // Parse the rss feed
-  // We're looking for title and description elements inside of item elements
-  int readIndex = 0;
-  int maxIndex = page.length();
-    
-  while(readIndex<maxIndex) {
-    readIndex = page.indexOf("<item>", readIndex);
-    int titleStart = page.indexOf("<title>", readIndex);
-    if( titleStart<0) break;
-    readIndex = titleStart + 7;
-    int titleEnd = page.indexOf("</title>", readIndex);
-    String title = page.substring(readIndex, titleEnd);
-    title = stripHtml(title);
-
-    sendString(title.c_str());
-    sendString(" ");
-
-    if(titleEnd<0) break;
-    readIndex = titleEnd + 8;
-    int descriptionStart = page.indexOf("<description>", readIndex);
-    if(descriptionStart<0) break;
-    readIndex = descriptionStart + 13;
-    int descriptionEnd = page.indexOf("</description>", readIndex);
-    if(descriptionEnd<0) break;
-    String description = page.substring(readIndex, descriptionEnd);
-    description = stripHtml(description);
-    readIndex = descriptionStart + description.length() + 14;
-
-    sendString(description.c_str());
-    sendString(" = ");
-  }  
-}
-
 
 //===================================  Send Menu  =======================================
 
@@ -1255,6 +1219,54 @@ char paddleInput()                                // monitor paddles & return a 
   return ' ';                                     // return on button press
 }
 
+void displayWPM(uint8_t wpm = 255)
+{
+    const int x=290,y=200;
+    tft.fillRect(x,y,24,20,BLACK);
+    tft.setCursor(x,y);
+    tft.print(wpm == 255 ? codeSpeed : wpm);
+}
+
+
+uint8_t calculateElements(uint8_t c) {
+uint8_t weight = 3; // 3 elements at the end of the character is ok the other 4 elements to make 7 are managed in checkSpeedLive() for the space character ' '
+
+while (c > 1) { // stop when value is 1 (or less)
+  weight += (c & 1) ? 1 + 1 : 3 + 1; // 1 is dit, 0 is dah + 1 extra element spacing
+  c >>= 1; // rotate bits right
+  }
+  return weight;
+}
+
+void checkSpeedLiveOriginal(uint8_t c, int result) {
+  static long start = millis();
+  static uint8_t elements = 0;
+  const uint8_t PARIS = 50; // "PARIS " is composed of 50 elements, see comment in calculateElements()
+
+  elements += (result < 0) ? 4 : calculateElements(c); // Result < 0, is an error. 4 is 7 - 3. 7 is the space between words, 3 is already assigned at the end of each character by calculateelements()
+  if (elements >= PARIS) {
+    long stop = millis();
+    long elapsed = stop - start; // see how long it took
+    start = stop;
+    int wpm = 60000 / elapsed; // convert elapsed time to WPM
+    elements = 0;
+    if (wpm >= MinSpeed && wpm <= MaxSpeed) {
+      displayWPM(wpm);
+    }
+  }
+}
+
+// Speed check - Morserino
+void checkSpeedLive(uint8_t c, int result) {
+  static int wpm = charSpeed;
+  wpm = (wpm + (int) (7200 / (avgDahTime + 3*avgDitTime))) / 2;     //// recalculate speed in wpm
+
+  if (wpm >= MinSpeed && wpm <= MaxSpeed) {
+      displayWPM(wpm);
+  }
+}
+
+
 char straightKeyInput()                           // decode straight key input
 {
   int bit=0, code=0;
@@ -1282,9 +1294,18 @@ char straightKeyInput()                           // decode straight key input
       {
         keying = false;                           // not just noise: mark key as up
         keyUp();                                  // turn off sound & led
-        if (timeDown > 2*ditPeriod)               // if longer than 2 dits, call it dah                  
-          bit++;                                  // dah: add '0' element to code
-        else code += (1<<bit++);                  // dit: add '1' element to code
+        if (timeDown > 2*ditPeriod)               // if longer than 2 dits, call it dah     
+        {
+          bit++;
+          avgDahTime = (3* avgDitTime + avgDahTime + timeDown) / 3;
+          Serial.println(avgDahTime);    
+        }                                  // dah: add '0' element to code
+        else 
+        {
+          avgDitTime = (4 * avgDitTime + timeDown) / 5;     
+          Serial.println(avgDitTime);    
+          code += (1<<bit++);                  // dit: add '1' element to code
+        }
       }
     }
     int wait = millis() - timer;                  // time since last element was sent
@@ -1292,6 +1313,7 @@ char straightKeyInput()                           // decode straight key input
     {                                             // so that must be end of character:
       code += (1<<bit);                           // add stop bit
       int result = decode(code);                  // look up code in morse array
+      checkSpeedLive(code, result); // Calculate live RPM
       if (result<0) return ' ';                   // oops, didn't find it
       else return '!'+result;                     // found it! return result
     }
@@ -1398,16 +1420,27 @@ void mimic1(char *text)
 {
   char ch, response[20];                                                          
   textRow=1; textCol=6;                           // set position of text 
-  sendStringNoWait(text);                         // display text & morse it
+  sendString(text);                               // display text & morse it
   strcpy(response,"");                            // start with empty response
   textRow=2; textCol=6;                           // set position of response
   while (!button_pressed && !ditPressed()         // wait until user is ready
     && !dahPressed()) ;
   do {                                            // user has started keying...
     ch = morseInput();                            // get a character
-    if (ch!=' ') addChar(response,ch);            // add it to the response
-    addCharacter(ch);                             // and put it on screen
-  } while (ch!=' ');                              // space = word timeout
+    if (ch!=' ' && ch!='?') addChar(response,ch);            // add it to the response
+    if (ch=='?') {
+      textRow=1; textCol=6;
+      delay(500);
+      sendString(text);
+      strcpy(response, "");
+      textRow=2; textCol=6;                           // set position of response
+      while (!button_pressed && !ditPressed()         // wait until user is ready
+         && !dahPressed()) ;
+    }
+    else {
+      addCharacter(ch);                             // and put it on screen
+    }
+  } while (ch!=' ' );                              // space = word timeout
   if (button_pressed) return;                     // leave without scoring
   if (!strcmp(text,response))                     // did user match the text?
     score++;                                      // yes, so increment score
