@@ -25,6 +25,7 @@
 #include "SD.h"
 #include "esp_now.h"
 #include "WiFi.h"
+#include "WiFiClientSecure.h"
 #include "HTTPClient.h"
 
 //===================================  Hardware Connections =============================
@@ -240,6 +241,20 @@ char *mainMenu[] = {" Receive ", "  Send  ", "Config "};
 char *menu0[]    = {" LICW    ", " Letters ", " Words   ", " Mixed   ", " SD Card ", " QSO     ", " Callsign", " News    ",  " Exit    "};
 char *menu1[]    = {" Practice", " Copy One", " Copy Two", " Cpy Word", " Cpy Call", " Flashcrd", " Head Cpy", " Two-Way ", " Exit    "};
 char *menu2[]    = {" Speed   ", " Chk Spd ", " Tone    ", " Key     ", " Callsign", " Screen  ", " Defaults", " Exit    "};
+
+char newsFeedMenu[][FNAMESIZE] = {" BBC", " Ham Newsline", " NPR", " NASA", " Reuters"};
+const char *newsFeedUrl[] = {
+  "https://feeds.bbci.co.uk/news/rss.xml",
+  "https://www.arnewsline.org/?format=rss",
+  "https://feeds.npr.org/1001/rss.xml",
+  "https://www.nasa.gov/news-release/feed/",
+  "https://feeds.reuters.com/Reuters/worldNews"
+};
+// Forward declarations needed before sendNews()
+int fileMenu(char menu[][FNAMESIZE], int itemCount);
+char *ltrim(char *str);
+String stripHtml(String s);
+String simplifyNewsForCw(String s);
 
 
 //===================================  Wireless Code  ===================================
@@ -650,13 +665,16 @@ void roger() {
 */
 
 void sendCharacter(char c) {                      // send a single ASCII character in Morse
+  static bool lastWasSpace = false;               // collapse repeated spaces into one gap
   if (button_pressed) return;                     // user wants to quit, so vamoose
   if (c<32) return;                               // ignore control characters
   if (c>96) c -= 32;                              // convert lower case to upper case
   if (c>90) return;                               // not a character
+  if ((c==32) && lastWasSpace) return;            // prevent double word spacing
   addCharacter(c);                                // display character on LCD
   if (c==32) wordSpace();                         // space between words 
   else sendElements(morse[c-33]);                 // send the character
+  lastWasSpace = (c==32);
   checkForSpeedChange();                          // allow change in speed while sending
   do {
     checkPause();
@@ -948,56 +966,40 @@ void sendQSO()
   sendString(qso);                                // send entire QSO
 }
 
-void sendNews()
+bool parseFeedUrl(const char *url, bool &secure, String &host, String &path)
 {
-  const int maxItems = 5;                         // keep RSS processing bounded
-  int itemsSent = 0;
+  String u = String(url);
+  secure = false;
 
-  WiFi.mode(WIFI_MODE_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PWD);
-
-  unsigned long wifiStart = millis();
-  while (WiFi.status() != WL_CONNECTED)
+  int start = 0;
+  if (u.startsWith("https://"))
   {
-    if (millis() - wifiStart > 15000)             // avoid hanging forever on bad WiFi
-    {
-      Serial.println("WiFi connect timeout");
-      return;
-    }
-    delay(500);
-    Serial.println("Connecting to WiFi..");
+    secure = true;
+    start = 8;
+  }
+  else if (u.startsWith("http://"))
+    start = 7;
+  else return false;
+
+  int slash = u.indexOf('/', start);
+  if (slash < 0)
+  {
+    host = u.substring(start);
+    path = "/";
+  }
+  else
+  {
+    host = u.substring(start, slash);
+    path = u.substring(slash);
   }
 
-  Serial.print("ESP32 IP on the WiFi network: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("Free heap before RSS: ");
-  Serial.println(ESP.getFreeHeap());
-
-  WiFiClientSecure client;
-  client.setInsecure();      // test mode (skip cert validation)
-
-  client.setTimeout(2000);
-
-IPAddress ip;
-if (!WiFi.hostByName("feeds.bbci.co.uk", ip)) {
-  Serial.println("DNS failed");
-  return;
+  return host.length() > 0;
 }
-  Serial.print("BBC IP: ");
-  Serial.println(ip);
 
-  if (!client.connect("feeds.bbci.co.uk", 443))
-  {
-    Serial.println("RSS server connect failed");
-    return;
-  }
-
-
-  client.println("GET /news/rss.xml HTTP/1.1");
-  client.println("Host: feeds.bbci.co.uk");
-  client.println("Connection: close");
-  client.println();
-
+int sendRssItems(Client &client, int maxItems)
+{
+  int itemsSent = 0;
+  Serial.printf("RSS parser start maxItems=%d\n", maxItems);
   bool inBody = false;
   bool inItem = false;
 
@@ -1005,7 +1007,6 @@ if (!WiFi.hostByName("feeds.bbci.co.uk", ip)) {
   {
     String line = client.readStringUntil('\n');
     line.trim();
-    Serial.println(line); 
 
     if (!inBody)
     {
@@ -1025,7 +1026,6 @@ if (!WiFi.hostByName("feeds.bbci.co.uk", ip)) {
     if ((titleStart >= 0) && (titleEnd > titleStart))
     {
       String title = line.substring(titleStart + 7, titleEnd);
-      Serial.println(title);
       title = stripHtml(title);
       title = simplifyNewsForCw(title);
       if (title.length())
@@ -1044,21 +1044,440 @@ if (!WiFi.hostByName("feeds.bbci.co.uk", ip)) {
       description = simplifyNewsForCw(description);
       if (description.length())
       {
-Serial.printf("desc len=%d\n", description.length());
-Serial.println(description);
         sendString(description.c_str());
         sendString(" = ");
         itemsSent++;
+        Serial.printf("itemsSent=%d\n", itemsSent);
       }
     }
   }
+  Serial.printf("RSS parser done itemsSent=%d\n", itemsSent);
+  return itemsSent;
+}
 
-  client.stop();
+bool readHttpStatusAndHeaders(Client &client, String &statusLine, String &location)
+{
+  statusLine = client.readStringUntil('\n');
+  statusLine.trim();
+  location = "";
+
+  while (client.connected() || client.available())
+  {
+    String headerLine = client.readStringUntil('\n');
+    headerLine.trim();
+    if (headerLine.length() == 0) break;          // end of headers
+    if (headerLine.startsWith("Location:"))
+    {
+      location = headerLine.substring(9);
+      location.trim();
+    }
+  }
+  return (statusLine.indexOf("200") >= 0);
+}
+
+int extractNewslineScriptNumber(const String &url)
+{
+  int stem = url.indexOf("nsln");
+  if (stem < 0) return -1;
+  stem += 4;
+  int dot = url.indexOf(".txt", stem);
+  if (dot <= stem) return -1;
+
+  for (int i = stem; i < dot; i++)
+    if (!isDigit(url.charAt(i))) return -1;
+
+  return url.substring(stem, dot).toInt();
+}
+
+bool findLatestNewslineTxtLink(Client &client, String &txtUrl)
+{
+  txtUrl = "";
+  String firstTxt = "";
+  int bestNum = -1;
+
+  while (client.connected() || client.available())
+  {
+    String line = client.readStringUntil('\n');
+    int searchFrom = 0;
+    while (true)
+    {
+      int hrefStart = line.indexOf("href=\"", searchFrom);
+      if (hrefStart < 0) break;
+      hrefStart += 6;
+      int hrefEnd = line.indexOf('"', hrefStart);
+      if (hrefEnd < 0) break;
+
+      String url = line.substring(hrefStart, hrefEnd);
+      url.trim();
+      if (url.indexOf(".txt") >= 0)
+      {
+        String absoluteUrl;
+        if (url.startsWith("http://") || url.startsWith("https://"))
+          absoluteUrl = url;
+        else absoluteUrl = "https://www.arnewsline.org" + url;
+
+        if (!firstTxt.length())
+          firstTxt = absoluteUrl;                  // fallback if filename format changes
+
+        int scriptNum = extractNewslineScriptNumber(absoluteUrl);
+        if (scriptNum > bestNum)
+        {
+          bestNum = scriptNum;
+          txtUrl = absoluteUrl;
+        }
+      }
+      searchFrom = hrefEnd + 1;
+    }
+  }
+
+  if (bestNum >= 0) return true;
+  if (firstTxt.length())
+  {
+    txtUrl = firstTxt;
+    return true;
+  }
+  return false;
+}
+
+int sendTextFromUrl(const String &url)
+{
+  int linesSent = 0;
+  bool secure;
+  String host, path;
+  if (!parseFeedUrl(url.c_str(), secure, host, path))
+    return 0;
+
+  HTTPClient http;
+  WiFiClient plainClient;
+  WiFiClientSecure secureClient;
+
+  bool begun = false;
+  if (secure)
+  {
+    secureClient.setInsecure();                   // keep cert behavior same as existing code
+    begun = http.begin(secureClient, url);
+  }
+  else begun = http.begin(plainClient, url);
+
+  if (!begun)
+    return 0;
+
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setRedirectLimit(5);
+  http.setTimeout(5000);
+  http.addHeader("User-Agent", "Mozilla/5.0 (ESP32 MorseTutor)");
+  http.addHeader("Accept", "text/plain, */*;q=0.8");
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK)
+  {
+    Serial.print("Script HTTP code: ");
+    Serial.println(code);
+    http.end();
+    return 0;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  newScreen();
+  while (http.connected() && !button_pressed)
+  {
+    String line = stream->readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0)
+    {
+      if (!stream->available()) break;
+      continue;
+    }
+    line = stripHtml(line);
+    line = simplifyNewsForCw(line);
+    if (!line.length()) continue;
+    sendString(line.c_str());
+    sendString(" ");
+    linesSent++;
+  }
+
+  http.end();
+  return linesSent;
+}
+
+bool sendHamNewslineScript(bool secure, const String &host, const String &path)
+{
+  String statusLine, location, scriptUrl;
+
+  if (secure)
+  {
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(5000);
+    if (!client.connect(host.c_str(), 443))
+      return false;
+
+    client.println("GET " + path + " HTTP/1.1");
+    client.println("Host: " + host);
+    client.println("User-Agent: Mozilla/5.0 (ESP32 MorseTutor)");
+    client.println("Accept: application/rss+xml, application/xml;q=0.9,*/*;q=0.8");
+    client.println("Connection: close");
+    client.println();
+
+    if (!readHttpStatusAndHeaders(client, statusLine, location))
+    {
+      Serial.print("HTTP status: ");
+      Serial.println(statusLine);
+      if (location.length())
+      {
+        Serial.print("Redirect location: ");
+        Serial.println(location);
+      }
+      client.stop();
+      return false;
+    }
+
+    if (!findLatestNewslineTxtLink(client, scriptUrl))
+    {
+      client.stop();
+      return false;
+    }
+    client.stop();
+  }
+  else
+  {
+    WiFiClient client;
+    client.setTimeout(5000);
+    if (!client.connect(host.c_str(), 80))
+      return false;
+
+    client.println("GET " + path + " HTTP/1.1");
+    client.println("Host: " + host);
+    client.println("User-Agent: Mozilla/5.0 (ESP32 MorseTutor)");
+    client.println("Accept: application/rss+xml, application/xml;q=0.9,*/*;q=0.8");
+    client.println("Connection: close");
+    client.println();
+
+    if (!readHttpStatusAndHeaders(client, statusLine, location))
+    {
+      Serial.print("HTTP status: ");
+      Serial.println(statusLine);
+      if (location.length())
+      {
+        Serial.print("Redirect location: ");
+        Serial.println(location);
+      }
+      client.stop();
+      return false;
+    }
+
+    if (!findLatestNewslineTxtLink(client, scriptUrl))
+    {
+      client.stop();
+      return false;
+    }
+    client.stop();
+  }
+
+  Serial.print("Newsline script URL: ");
+  Serial.println(scriptUrl);
+
+  int linesSent = sendTextFromUrl(scriptUrl);
+  Serial.printf("Newsline script lines sent=%d\n", linesSent);
+  return (linesSent > 0);
+}
+
+void sendNews()
+{
+  const int maxItems = 5;                         // keep RSS processing bounded
+  int feed = fileMenu(newsFeedMenu, ELEMENTS(newsFeedMenu));
+  button_pressed = false;                         // clear menu click so RSS loop can run
+  Serial.print("Selected feed: ");
+  Serial.println(ltrim(newsFeedMenu[feed]));
+  Serial.print("Feed URL: ");
+  Serial.println(newsFeedUrl[feed]);
+
+  bool secure;
+  String host, path;
+  if (!parseFeedUrl(newsFeedUrl[feed], secure, host, path))
+  {
+    Serial.println("Invalid feed URL");
+    tft.println("Bad feed URL");
+    delay(1500);
+    return;
+  }
+
+  newScreen();
+  tft.setTextColor(TEXTCOLOR);
+  tft.println("News Feed:");
+  tft.println(ltrim(newsFeedMenu[feed]));
+
+  WiFi.mode(WIFI_MODE_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PWD);
+
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    if (millis() - wifiStart > 15000)
+    {
+      Serial.println("WiFi connect timeout");
+      tft.println("WiFi timeout");
+      delay(1500);
+      return;
+    }
+    delay(500);
+    Serial.println("Connecting to WiFi..");
+  }
+
+  Serial.print("ESP32 IP on the WiFi network: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("Free heap before RSS: ");
+  Serial.println(ESP.getFreeHeap());
+
+  IPAddress ip;
+  if (!WiFi.hostByName(host.c_str(), ip))
+  {
+    Serial.println("DNS failed");
+    tft.println("DNS failed");
+    delay(1500);
+    return;
+  }
+  Serial.print("Feed IP: ");
+  Serial.println(ip);
+
+  if (feed == 1)                                  // Ham Newsline: follow SCRIPT .txt link in first item
+  {
+    if (!sendHamNewslineScript(secure, host, path))
+    {
+      Serial.println("Could not load Newsline script");
+      tft.println("Newsline script fail");
+      delay(1500);
+    }
+    WiFi.disconnect();
+    Serial.print("Free heap after RSS: ");
+    Serial.println(ESP.getFreeHeap());
+    return;
+  }
+
+  if (secure)
+  {
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(3000);
+    if (!client.connect(host.c_str(), 443))
+    {
+      Serial.println("RSS server connect failed");
+      tft.println("HTTPS connect fail");
+      delay(1500);
+      return;
+    }
+
+    client.println("GET " + path + " HTTP/1.1");
+    client.println("Host: " + host);
+    client.println("User-Agent: Mozilla/5.0 (ESP32 MorseTutor)");
+    client.println("Accept: application/rss+xml, application/xml;q=0.9,*/*;q=0.8");
+    client.println("Connection: close");
+    client.println();
+
+    String statusLine = client.readStringUntil('\n');
+    statusLine.trim();
+    Serial.print("HTTP status: ");
+    Serial.println(statusLine);
+    if (statusLine.indexOf("200") < 0)
+    {
+      String headerLine, location;
+      while (client.connected() || client.available())
+      {
+        headerLine = client.readStringUntil('\n');
+        headerLine.trim();
+        if (headerLine.length() == 0) break;
+        if (headerLine.startsWith("Location:"))
+        {
+          location = headerLine.substring(9);
+          location.trim();
+        }
+      }
+      if (location.length())
+      {
+        Serial.print("Redirect location: ");
+        Serial.println(location);
+      }
+      Serial.println("Feed rejected before parse");
+      tft.println("Feed rejected");
+      delay(1500);
+      client.stop();
+      return;
+    }
+
+    newScreen();
+    int itemsSent = sendRssItems(client, maxItems);
+    if (itemsSent == 0)
+    {
+      Serial.println("No RSS items parsed from feed");
+      tft.println("No RSS items parsed");
+      delay(1500);
+    }
+    client.stop();
+  }
+  else
+  {
+    WiFiClient client;
+    client.setTimeout(3000);
+    if (!client.connect(host.c_str(), 80))
+    {
+      Serial.println("RSS server connect failed");
+      tft.println("HTTP connect fail");
+      delay(1500);
+      return;
+    }
+
+    client.println("GET " + path + " HTTP/1.1");
+    client.println("Host: " + host);
+    client.println("User-Agent: Mozilla/5.0 (ESP32 MorseTutor)");
+    client.println("Accept: application/rss+xml, application/xml;q=0.9,*/*;q=0.8");
+    client.println("Connection: close");
+    client.println();
+
+    String statusLine = client.readStringUntil('\n');
+    statusLine.trim();
+    Serial.print("HTTP status: ");
+    Serial.println(statusLine);
+    if (statusLine.indexOf("200") < 0)
+    {
+      String headerLine, location;
+      while (client.connected() || client.available())
+      {
+        headerLine = client.readStringUntil('\n');
+        headerLine.trim();
+        if (headerLine.length() == 0) break;
+        if (headerLine.startsWith("Location:"))
+        {
+          location = headerLine.substring(9);
+          location.trim();
+        }
+      }
+      if (location.length())
+      {
+        Serial.print("Redirect location: ");
+        Serial.println(location);
+      }
+      Serial.println("Feed rejected before parse");
+      tft.println("Feed rejected");
+      delay(1500);
+      client.stop();
+      return;
+    }
+
+    newScreen();
+    int itemsSent = sendRssItems(client, maxItems);
+    if (itemsSent == 0)
+    {
+      Serial.println("No RSS items parsed from feed");
+      tft.println("No RSS items parsed");
+      delay(1500);
+    }
+    client.stop();
+  }
+
   WiFi.disconnect();
   Serial.print("Free heap after RSS: ");
   Serial.println(ESP.getFreeHeap());
 }
-
 String stripHtml(String s)
 {
   // Keep CDATA text, just remove wrappers
@@ -1087,14 +1506,9 @@ String stripHtml(String s)
 String simplifyNewsForCw(String s)
 {
   const String drop = ":'\";-()[]";
-  for (int i = 0; i < s.length(); i++)
-  {
+  for (int i = s.length() - 1; i >= 0; i--)
     if (drop.indexOf(s.charAt(i)) >= 0)
-      s.setCharAt(i, ' ');
-  }
-
-  while (s.indexOf("  ") >= 0)
-    s.replace("  ", " ");
+      s.remove(i, 1);
 
   s.trim();
   return s;
