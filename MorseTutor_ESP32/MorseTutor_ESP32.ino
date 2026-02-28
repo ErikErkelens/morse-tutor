@@ -42,8 +42,7 @@
 
 //===================================  Wireless Constants ===============================
 #define CHANNEL             1                     // Wifi channel number
-#define WIFI_SSID      "W8BH Tutor"               // Wifi network name
-#define WIFI_PWD       "9372947313"               // Wifi password
+#include "wifi_secrets.h"                          // local WiFi credentials (gitignored)
 #define MAXBUFLEN         100                     // size of incoming character buffer
 #define CMD_ADDME        0x11                     // request to add this unit as a peer
 #define CMD_LEAVING      0x12                     // flag this unit as leaving
@@ -323,7 +322,7 @@ bool networkFound()                               // Scan for peers in AP mode
   {
     String SSID = WiFi.SSID(i);                   // get network's name
     String BSSIDstr = WiFi.BSSIDstr(i);           // and its Mac address
-    if (SSID.indexOf("W8BH") == 0)                // is it our W8BH network?
+    if (SSID.indexOf(WIFI_SSID) == 0)                // is it our W8BH network?
     { 
       int mac[6];                                 // Yes, so save its information
       sscanf(BSSIDstr.c_str(),                    // parse mac address into componentss
@@ -949,104 +948,155 @@ void sendQSO()
   sendString(qso);                                // send entire QSO
 }
 
-void sendNews() {
+void sendNews()
+{
+  const int maxItems = 5;                         // keep RSS processing bounded
+  int itemsSent = 0;
+
   WiFi.mode(WIFI_MODE_STA);
-  WiFi.begin("W8BH Tutor","REDACTED");
-  
-  while (WiFi.status() != WL_CONNECTED) {
+  WiFi.begin(WIFI_SSID, WIFI_PWD);
+
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    if (millis() - wifiStart > 15000)             // avoid hanging forever on bad WiFi
+    {
+      Serial.println("WiFi connect timeout");
+      return;
+    }
     delay(500);
     Serial.println("Connecting to WiFi..");
   }
- 
+
   Serial.print("ESP32 IP on the WiFi network: ");
   Serial.println(WiFi.localIP());
+  Serial.print("Free heap before RSS: ");
+  Serial.println(ESP.getFreeHeap());
 
-  HTTPClient http;
-  WiFiClient client;
-  char c;
+  WiFiClientSecure client;
+  client.setInsecure();      // test mode (skip cert validation)
 
-  if (client.connect("feeds.bbci.co.uk", 80)) {
-  //if (client.connect("www.arrl.org", 80)) {
+  client.setTimeout(2000);
 
-    Serial.println("connected to server");
+IPAddress ip;
+if (!WiFi.hostByName("feeds.bbci.co.uk", ip)) {
+  Serial.println("DNS failed");
+  return;
+}
+  Serial.print("BBC IP: ");
+  Serial.println(ip);
 
-    // Make a HTTP request:
-
-    //client.println("GET /arrl.rss HTTP/1.1");
-    client.println("GET /news/rss.xml HTTP/1.1");
-    client.println("Host: feeds.bbci.co.uk");    
-
-    client.println("Connection: close");
-    client.println();
-
-    unsigned long timeout = millis();
-    while (client.available() == 0) {
-        if (millis() - timeout > 5000) {
-            Serial.println(">>> Client Timeout !");
-            client.stop();
-            return;
-        }
-    }
-
-    String page;
-    while (client.available()) {
-      String line = client.readStringUntil('\r');
-      page += line;
-    }
-
-    int readIndex = 0;
-    int maxIndex = page.length();
-      
-    while(readIndex<maxIndex) {
-      readIndex = page.indexOf("<item>", readIndex);
-      int titleStart = page.indexOf("<title>", readIndex);
-      if( titleStart<0) break;
-      readIndex = titleStart + 7;
-      int titleEnd = page.indexOf("</title>", readIndex);
-      String title = page.substring(readIndex, titleEnd);
-      title = stripHtml(title);
-      sendString(title.c_str());
-      sendString(" ");
-      if(titleEnd<0) break;
-      readIndex = titleEnd + 8;
-      int descriptionStart = page.indexOf("<description>", readIndex);
-      if(descriptionStart<0) break;
-      readIndex = descriptionStart + 13;
-      int descriptionEnd = page.indexOf("</description>", readIndex);
-      if(descriptionEnd<0) break;
-      String description = page.substring(readIndex, descriptionEnd);
-      description = stripHtml(description);
-      sendString(description.c_str());
-      readIndex = descriptionStart + description.length() + 14;
-      sendString(" = ");
-    }
-  
-
+  if (!client.connect("feeds.bbci.co.uk", 443))
+  {
+    Serial.println("RSS server connect failed");
+    return;
   }
-  
+
+
+  client.println("GET /news/rss.xml HTTP/1.1");
+  client.println("Host: feeds.bbci.co.uk");
+  client.println("Connection: close");
+  client.println();
+
+  bool inBody = false;
+  bool inItem = false;
+
+  while ((client.connected() || client.available()) && (itemsSent < maxItems) && !button_pressed)
+  {
+    String line = client.readStringUntil('\n');
+    line.trim();
+    Serial.println(line); 
+
+    if (!inBody)
+    {
+      if (line.length() == 0)
+        inBody = true;                            // end of HTTP headers
+      continue;
+    }
+
+    if (line.indexOf("<item>") >= 0)
+      inItem = true;
+
+    if (!inItem)
+      continue;
+
+    int titleStart = line.indexOf("<title>");
+    int titleEnd = line.indexOf("</title>");
+    if ((titleStart >= 0) && (titleEnd > titleStart))
+    {
+      String title = line.substring(titleStart + 7, titleEnd);
+      Serial.println(title);
+      title = stripHtml(title);
+      title = simplifyNewsForCw(title);
+      if (title.length())
+      {
+        sendString(title.c_str());
+        sendString(" ");
+      }
+    }
+
+    int descStart = line.indexOf("<description>");
+    int descEnd = line.indexOf("</description>");
+    if ((descStart >= 0) && (descEnd > descStart))
+    {
+      String description = line.substring(descStart + 13, descEnd);
+      description = stripHtml(description);
+      description = simplifyNewsForCw(description);
+      if (description.length())
+      {
+Serial.printf("desc len=%d\n", description.length());
+Serial.println(description);
+        sendString(description.c_str());
+        sendString(" = ");
+        itemsSent++;
+      }
+    }
+  }
+
+  client.stop();
+  WiFi.disconnect();
+  Serial.print("Free heap after RSS: ");
+  Serial.println(ESP.getFreeHeap());
 }
 
-String stripHtml(String s) {
-  int readIndex = 0;
-  int maxIndex = s.length();
+String stripHtml(String s)
+{
+  // Keep CDATA text, just remove wrappers
+  s.replace("<![CDATA[", "");
+  s.replace("]]>", "");
 
-  // remove any html markup, they start with &lt; and end with &gt; ('<' and '>')
-  while(readIndex<maxIndex) {
-    int startTag = s.indexOf("&lt;", readIndex);
-    int endTag = s.indexOf("&gt;", readIndex);
-    int lenRemove = endTag + 4 - startTag;
-    s.remove(startTag, lenRemove);
-    maxIndex -= lenRemove;
+  // Remove escaped tags like &lt;...&gt;
+  while (true) {
+    int startTag = s.indexOf("&lt;");
+    if (startTag < 0) break;
+    int endTag = s.indexOf("&gt;", startTag + 4);
+    if (endTag < 0) break;
+    s.remove(startTag, endTag + 4 - startTag);
   }
+
   s.replace("&apos;", "'");
   s.replace("&#039;", "'");
   s.replace("&amp;", "&");
-  s.replace("&#038;", "\"");
+  s.replace("&quot;", "\"");
+  s.replace("&#034;", "\"");
+  s.replace("&#038;", "&");
+  s.trim();
+  return s;
+}
 
-  s.replace("<![CDATA[", "");
-  s.replace("]", "");
-  s.replace(">", "");
-  s.replace("<", "");
+String simplifyNewsForCw(String s)
+{
+  const String drop = ":'\";-()[]";
+  for (int i = 0; i < s.length(); i++)
+  {
+    if (drop.indexOf(s.charAt(i)) >= 0)
+      s.setCharAt(i, ' ');
+  }
+
+  while (s.indexOf("  ") >= 0)
+    s.replace("  ", " ");
+
+  s.trim();
   return s;
 }
 
