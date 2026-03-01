@@ -1,2 +1,6 @@
 # Local WiFi credentials
 MorseTutor_ESP32/wifi_secrets.h
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
